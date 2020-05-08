@@ -1,0 +1,78 @@
+# enums
+# note that no commas are needed
+enum ExprKind {
+  ADD
+  MUL
+  SUB
+  DIV
+  NEG
+}
+
+# records/groups of elements
+# again no commas or semi colons
+# multiple variables can be declared on the same line
+# syntax of defining those variables is:
+# name: type
+# pointers are denoted by * (just like C)
+struct Expr {
+  kind: ExprKind
+  left, right: Expr*
+}
+
+# variables have type inference and are defined with var/const
+var pi = 3.14
+const MAX_EXPRS = 1024
+
+# functions
+# note that no semi colons are needed
+func fact_rec(n: uint) : uint {
+  if (n == 0) {
+    return 1
+  } else {
+    return n * fact_rec(n - 1)
+  }
+}
+
+# note := to do assignment and declaration
+# var r: uint = 1
+# note that assignments are not expressions and are purely statements
+func fact_iter(n: uint) : uint {
+  r := 1
+  for (i := 1; i <= n; ++i) {
+    r *= i
+  }
+  return r
+}
+
+# more examples
+struct Vector {
+  x, y: float
+}
+
+struct Rect {
+  pos, size: Vector
+}
+
+func make_rect(min, max: Vector) : Rect {
+  return Rect {
+    pos = {min.x, min.y},
+    size = {max.x - min.x, max.y - min.y}
+  }
+}
+
+# Five levels of precedence, highest to lowest
+# this makes if (a && b == 0) and if (a*b + c*d) seamless
+ - mul: * / % >> << &
+ - add: + - |
+ - cmp: == >= <=
+ - and: &&
+ -  or: ||
+
+# packages
+# all files in a dir are part of the same 'package'
+
+foo/a.ion
+foo/b.ion
+foo/c.ion
+
+import foo
