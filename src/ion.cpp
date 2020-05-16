@@ -6,7 +6,10 @@
 #include <cstdlib>
 #include <cstring>
 
-// ugly, but faster to compile than sstream
+#include <string>
+using namespace std::string_literals;
+
+// ugly, but faster to compile than sstream/variadic
 void fatal(const char* fmt, ...) {
   va_list args;
   va_start(args, fmt);
@@ -224,61 +227,70 @@ void lex_test() {
 class Parser {
  public:
   Parser(const char* stream) : tokenizer_(stream) { next_token(); }
-  int parse_expr();  // forward declare
+  std::string parse_expr();  // forward declare
 
-  int parse_expr3() {
-    int value = 0;
+  std::string parse_expr3() {
+    std::string str;
     if (is_token(TokenInt)) {
-      value = token_.val;
+      str = std::to_string(token_.val);
       next_token();
-    } else if (match_token(tk('('))) {
-      value = parse_expr();
-      expect_token(tk(')'));
+      // } else if (match_token(tk('('))) {
+      //   value = parse_expr();
+      //   expect_token(tk(')'));
     } else {
       fatal("expected integer or (. got %s", token_kind_name(token_.kind));
     }
-    return value;
+    return str;
   }
 
-  int parse_expr2() {
+  std::string parse_expr2() {
     if (match_token(tk('-'))) {
-      return -parse_expr2();
+      return "( "s + "- " + parse_expr2() + " )";
     } else {
       return parse_expr3();
     }
   }
-  int parse_expr1() {
-    int value = parse_expr2();
+
+  std::string parse_expr1() {
+    auto ret = [](auto c, auto s1, auto s2) {
+      return "( "s + c + " " + s1 + " " + s2 + " )";
+    };
+
+    auto first = parse_expr2();
     while (is_token(tk('*')) || is_token(tk('/'))) {
       char op = token_.kind;
       next_token();
-      int rvalue = parse_expr2();
+      auto second = parse_expr2();
       if (op == '*') {
-        value *= rvalue;
+        first = ret("*"s, first, second);
       } else {
         assert(op == '/');
-        assert(rvalue != 0);
-        value /= rvalue;
+        // assert(rvalue != 0);
+        first = ret("/"s, first, second);
       }
     }
-    return value;
+    return first;
   }
 
-  int parse_expr0() {
-    int value = parse_expr1();
+  std::string parse_expr0() {
+    auto ret = [](auto c, auto s1, auto s2) {
+      return "( "s + c + " " + s1 + " " + s2 + " )";
+    };
+
+    auto first = parse_expr1();
     while (is_token(tk('+')) || is_token(tk('-'))) {
       char op = token_.kind;
       next_token();
-      int rvalue = parse_expr1();
+      auto second = parse_expr1();
       if (op == '+') {
-        value += rvalue;
+        first = ret("+"s, first, second);
       } else {
         assert(op == '-');
-        value -= rvalue;
+        first = ret("-"s, first, second);
       }
     }
 
-    return value;
+    return first;
   }
 
  private:
@@ -315,7 +327,7 @@ class Parser {
   Tokenizer tokenizer_;
 };
 
-int Parser::parse_expr() {
+std::string Parser::parse_expr() {
   return parse_expr0();
 }
 
@@ -325,15 +337,16 @@ void parse_test() {
     return parser.parse_expr();
   };
 
-  assert(test("1") == 1);
-  assert(test("(1)") == 1);
-  assert(test("3-4+10") == 9);
-  assert(test("3+4*5") == 23);
-  assert(test("-3") == -3);
-  assert(test("1+10/2") == 6);
-  assert(test("2*3+4*5") == 26);
-  assert(test("2+-3") == -1);
-  assert(test("--3") == 3);
+  printf("%s\n", test("1").c_str());
+  // printf("%s\n", test("(1)").c_str());
+  printf("%s\n", test("3-4+10").c_str());
+  printf("%s\n", test("3+4*5").c_str());
+  printf("%s\n", test("-3").c_str());
+  printf("%s\n", test("1+10/2").c_str());
+  printf("%s\n", test("2*3+4*5").c_str());
+  printf("%s\n", test("2+-3").c_str());
+  printf("%s\n", test("--3").c_str());
+  printf("%s\n", test("12*34+45/56+-25").c_str());
 }
 
 int main() {
