@@ -28,17 +28,6 @@ void syntax_error(const char* fmt, ...) {
   va_end(args);
 }
 
-void check_eq(uint64_t a, uint64_t b) {
-  if (a != b) {
-    fatal("%lu not equal to %lu. Exiting", a, b);
-  }
-}
-void check_eq(double a, double b) {
-  if (a != b) {
-    fatal("%f not equal to %f. Exiting", a, b);
-  }
-}
-
 template <typename T>
 struct vector {
   vector() = default;
@@ -93,6 +82,26 @@ struct vector {
   int capacity_ = 0;
   int size_ = 0;
   void* ptr_ = nullptr;
+};
+
+template <typename T>
+struct unique_ptr {
+  unique_ptr(T* p) : p_(p) {}
+  ~unique_ptr() { delete p_; }
+  unique_ptr(const unique_ptr&) = delete;
+  unique_ptr& operator=(const unique_ptr&) = delete;
+  unique_ptr(unique_ptr&& other) noexcept : p_(other.p_) { other.p_ = nullptr; }
+  unique_ptr& operator=(unique_ptr&& other) noexcept {
+    delete p_;
+    p_ = other.p_;
+    other.p_ = nullptr;
+  }
+
+  T* get() { return p_; }
+  const T* get() const { return p_; }
+
+ private:
+  T* p_;
 };
 
 void vec_test() {
@@ -644,7 +653,7 @@ void lex_test() {
   {                                   \
     auto& token = tokenizer.next();   \
     assert(token.kind == TokenFloat); \
-    check_eq(token.float_val, X);     \
+    assert(token.float_val == X);     \
   }
 
 #define expect_str(X)                             \
@@ -741,13 +750,168 @@ void lex_test() {
 #undef expect_float
 }
 
+// clang-format off
+//
+// parser EBNF for ion
+//
+// ==== DECLARATIONS ====
+//
+// type_list = type (',' type)*
+// name_list = NAME (',' NAME)*
+//
+// base_type =  NAME
+//            | 'func' '(' type_list? ')' (':' type)?
+//            | '(' type ')'
+// type = base_type ('[' expr? ']' | '*')*
+//
+// enum_item = NAME (= expr)?
+// enum_items = enum_item (',' enum_item)* ','?
+// enum_decl = NAME '{' enum_items '}'
+//
+// aggregate_field = name_list ':' type ';'
+// aggregate_decl = NAME '{' (aggregate_field ';')* '}'
+//
+// var_decl = NAME '=' expr
+//          | NAME ':' type ('=' expr)?
+//
+// const_decl = NAME '=' expr
+//
+// typedef_decl = NAME '=' type
+//
+// func_param = NAME ':' type
+// func_param_list = func_param (',' func_param)?
+// func_decl = NAME '(' func_param_list? ')' (':' type)? '{' stmt_block '}'
+//
+// decl = 'enum' enum_decl
+//      | 'struct' aggregate_decl
+//      | 'union' aggregate_decl
+//      | 'var' var_decl
+//      | 'const' const_decl
+//      | 'typedef' typedef_decl
+//      | 'func' func_decl
+//
+//
+//  ==== STATEMENTS ====
+//
+// assign_op = '=' | ADD_ASSIGN | COLON_ASSIGN | ...
+//
+// switch_case = (CASE expr | DEFAULT) ':' stmt*
+// switch_block = '{' switch_case* '}'
+//
+// stmt = 'return' expr
+//       | 'break' ';'
+//       | 'continue' ';'
+//       | '{' stmt* '}'
+//       | 'if' '(' expr ')' stmt_block ('else' 'if' '(' expr ')' stmt_block)* ('else' stmt_block)?
+//       | 'while' '(' expr ')' stmt_block
+//       | 'for' '(' stmt_list  ';' expr ';' stmt_block ')'
+//       | 'do' stmt_block 'while' '(' expr ')'
+//       | 'switch' '(' expr ')' switch_block
+//       | expr (INC | DEC | assign_op expr)?
+//
+//
+//  ===== EXPRESSIONS =====
+//
+// cmp_op = EQ | NEQ | '<' | LTEQ | '>' | GTEQ
+// add_op = '+' | '-' | '|'
+// mul_op = '*' | '/' | '%' | RightShift | LeftShift | '&'
+//
+//
+// typespec = NAME | '(' ':' type ')'
+// operand_expr = INT
+//              | FLOAT
+//              | STR
+//              | NAME
+//              | typespec? '{' expr_list '}'
+//              | CAST '(' type ')' expr
+//              | '(' expr ')'
+//
+// base_expr = operand_expr ('(' expr_list')' | '[' expr ']' | '.' NAME)*
+// unary_expr = [+-&*] unary_expr
+//            | base_expr
+// mul_expr = unary_expr (mul_op unary_exp)*
+// add_expr = mul_expr (add_aop mul_expr )*
+// cmp_expr = mul_expr (cmp_op mul_expr)*
+// and_expr = cmp_expr (AND cmp_expr)*
+// or_expr = and_expr (OR and_expr)*
+// ternary_expr = or_expr  ('?' ternary_expr ':' ternary_expr)?
+// expr = ternary_expr
+//
+// clang-format on
+
+// ast
+struct Type {};
+enum DeclKind {
+  DeclNone,
+  DeclEnum,
+  DeclStruct,
+  DeclUnion,
+  DeclVar,
+  DeclConst,
+  DeclTypeDef,
+  DeclFunc
+};
+
+struct DeclBase {
+  virtual ~DeclBase() = default;
+};
+
+struct EnumItems : DeclBase {
+  struct Data {
+    const char* name;
+    Type* type;
+  };
+  vector<Data> items_;
+};
+
+struct Decl {
+  DeclKind kind;
+  const char* name;
+  unique_ptr<DeclBase> base_;
+};
+
+enum StmtKind {
+  StmtNone,
+  StmtReturn,
+  StmtBreak,
+  StmtContinue,
+  StmtBlock,
+  StmtIf,
+  StmWhile,
+  StmtFor,
+  StmtDo,
+  StmtSwitch,
+  StmtAutoAssign,  // colon assign
+  StmtAssign,
+  StmtExpr,
+};
+struct Stmt {};
+
+enum ExprKind {
+  ExprNone,
+  ExprInt,
+  ExprFloat,
+  ExprName,
+  ExprStr,
+  ExprCast,
+  ExprCall,
+  ExprIndex,
+  ExprField,
+  ExprCompound,
+  ExprUnary,
+  ExprBinary,
+  ExprTernary
+};
+struct Expr {};
+
 void run_tests() {
   vec_test();
-  lex_test();
   str_intern_test();
+  lex_test();
 }
 
 int main() {
   run_tests();
+  puts("tests ran successfully...");
   return 0;
 }

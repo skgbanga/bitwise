@@ -67,6 +67,7 @@ func make_rect(min, max: Vector) : Rect {
  - cmp: == >= <=
  - and: &&
  -  or: ||
+ - ternary
 
 # packages
 # all files in a dir are part of the same 'package'
