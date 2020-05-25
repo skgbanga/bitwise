@@ -8,6 +8,8 @@
 #include <cstdlib>
 #include <cstring>
 
+#include <type_traits>  // is_base_of, enable_if, is_trivial, is_trivially_copyable
+
 // ugly, but faster to compile than sstream
 [[noreturn]] void fatal(const char* fmt, ...) {
   va_list args;
@@ -30,6 +32,7 @@ void syntax_error(const char* fmt, ...) {
 
 template <typename T>
 struct vector {
+  static_assert(std::is_trivial_v<T> && std::is_trivially_copyable_v<T>);
   vector() = default;
 
   vector(const vector&) = delete;
@@ -44,19 +47,27 @@ struct vector {
   ~vector() { free(ptr_); }
 
  public:
-  void push_back(const T& t) {
+  T& push_back(T t) {
     if (size_ == capacity_) {
       grow();
     }
     assert(size_ < capacity_);
 
-    ptr()[size_++] = t;
+    ptr()[size_++] = std::move(t);
+    return ptr()[size_ - 1];
   }
+
   int size() const { return size_; }
   int capacity() const { return capacity_; }
-  T& operator[](int idx) { return ptr()[idx]; }
+  T& operator[](int idx) {
+    assert(idx < size_);
+    return ptr()[idx];
+  }
   const T* data() { return reinterpret_cast<const T*>(ptr_); }
   const T* data() const { return reinterpret_cast<const T*>(ptr_); }
+
+  T* begin() { return reinterpret_cast<T*>(ptr_); }
+  T* end() { return reinterpret_cast<T*>(ptr_) + size_; }
 
  private:
   void grow() {
@@ -87,6 +98,10 @@ struct vector {
 template <typename T>
 struct unique_ptr {
   unique_ptr(T* p) : p_(p) {}
+
+  template <typename U, std::enable_if_t<std::is_base_of_v<T, U>, int> = 0>
+  unique_ptr(unique_ptr<U>&& other) : p_(other.release()) {}
+
   ~unique_ptr() { delete p_; }
   unique_ptr(const unique_ptr&) = delete;
   unique_ptr& operator=(const unique_ptr&) = delete;
@@ -95,14 +110,25 @@ struct unique_ptr {
     delete p_;
     p_ = other.p_;
     other.p_ = nullptr;
+    return *this;
+  }
+  T* operator->() { return p_; }
+  T* get() { return p_; }
+  const T* operator->() const { return p_; }
+  T* release() {
+    T* p = p_;
+    p_ = nullptr;
+    return p;
   }
 
-  T* get() { return p_; }
-  const T* get() const { return p_; }
-
  private:
-  T* p_;
+  T* p_ = nullptr;
 };
+
+template <typename T, typename... Args>
+unique_ptr<T> make_unique(Args&&... args) {
+  return unique_ptr<T>(new T{std::forward<Args>(args)...});
+}
 
 void vec_test() {
   vector<int> buf;
@@ -114,6 +140,20 @@ void vec_test() {
   assert(buf.size() == N);
   for (int i = 0; i < N; ++i) {
     assert(buf[i] == i);
+  }
+
+  // iteration
+  {
+    vector<int> buf;
+    for (int i = 0; i < 5; ++i) {
+      buf.push_back(i);
+    }
+
+    int sum = 0;
+    for (auto i : buf) {
+      sum += i;
+    }
+    assert(sum == 10);
   }
 }
 
@@ -840,28 +880,139 @@ void lex_test() {
 // clang-format on
 
 // ast
-struct Type {};
-enum DeclKind {
-  DeclNone,
-  DeclEnum,
-  DeclStruct,
-  DeclUnion,
-  DeclVar,
-  DeclConst,
-  DeclTypeDef,
-  DeclFunc
+
+// Forward Declarations
+struct Expr;
+struct Stmt;
+struct Decl;
+struct TypeSpec;
+
+enum class TypeSpecKind {
+  None,
+  Name,
+  Func,
+  Array,
+  Pointer,
+  //...
+};
+
+struct BaseTypeSpec {
+  virtual ~BaseTypeSpec() = default;
+};
+
+struct NameTypeSpec : BaseTypeSpec {
+  const char* name;
+};
+
+struct FuncTypeSpec : BaseTypeSpec {
+  const char* name;
+  vector<TypeSpec*> args;
+  TypeSpec* ret_type;
+};
+
+struct ArrayTypeSpec : BaseTypeSpec {
+  TypeSpec* type;
+  Expr* len;
+};
+
+struct PointerTypeSpec : BaseTypeSpec {
+  TypeSpec* type;
+};
+
+struct TypeSpec {
+  TypeSpecKind kind_;
+  unique_ptr<BaseTypeSpec> base_;
+
+  template <typename T>
+  T get() {
+    static_assert(std::is_pointer_v<T>);
+    static_assert(std::is_base_of_v<BaseTypeSpec, std::remove_pointer_t<T>>);
+    assert(dynamic_cast<T>(base_.get()));
+    return static_cast<T>(base_.get());
+  }
+};
+
+class TypeSpecs {
+ public:
+  ~TypeSpecs() {
+    for (auto t : specs_) {
+      delete t;
+    }
+  }
+  TypeSpec* typespec_name(const char* name) {
+    auto up = make_unique<NameTypeSpec>();
+    up->name = name;
+    return specs_.push_back(new TypeSpec{TypeSpecKind::Name, std::move(up)});
+  }
+  TypeSpec* typespec_func() {
+    auto up = make_unique<FuncTypeSpec>();
+    // TODO
+    return specs_.push_back(new TypeSpec{TypeSpecKind::Func, std::move(up)});
+  }
+  TypeSpec* typespec_array(TypeSpec* base, Expr* len) {
+    auto up = make_unique<ArrayTypeSpec>();
+    up->type = base;
+    up->len = len;
+    return specs_.push_back(new TypeSpec{TypeSpecKind::Array, std::move(up)});
+  }
+  TypeSpec* typespec_pointer(TypeSpec* base) {
+    auto up = make_unique<PointerTypeSpec>();
+    up->type = base;
+    return specs_.push_back(new TypeSpec{TypeSpecKind::Pointer, std::move(up)});
+  }
+
+ private:
+  vector<TypeSpec*> specs_;
+};
+
+enum class DeclKind {
+  None,
+  Enum,
+  Struct,
+  Union,
+  Var,
+  Const,
+  TypeDef,
+  Func,
+  //...
 };
 
 struct DeclBase {
   virtual ~DeclBase() = default;
 };
 
-struct EnumItems : DeclBase {
+struct EnumDecl : DeclBase {
   struct Data {
     const char* name;
-    Type* type;
+    TypeSpec* type;
   };
   vector<Data> items_;
+};
+
+struct AggregateDecl : DeclBase {
+  struct Data {
+    const char** names;
+    TypeSpec* type;
+  };
+  vector<Data> items_;
+};
+
+struct CommonDecl : DeclBase {
+  TypeSpec* type_;
+  Expr* expr_;
+};
+using VarDecl = CommonDecl;
+using ConstDecl = CommonDecl;
+using TypeDefDecl = CommonDecl;
+
+struct FuncDecl : DeclBase {
+  struct Param {
+    const char* name;
+    TypeSpec* type;
+  };
+
+  Param* params_;
+  TypeSpec* return_type_;
 };
 
 struct Decl {
@@ -870,44 +1021,424 @@ struct Decl {
   unique_ptr<DeclBase> base_;
 };
 
-enum StmtKind {
-  StmtNone,
-  StmtReturn,
-  StmtBreak,
-  StmtContinue,
-  StmtBlock,
-  StmtIf,
-  StmWhile,
-  StmtFor,
-  StmtDo,
-  StmtSwitch,
-  StmtAutoAssign,  // colon assign
-  StmtAssign,
-  StmtExpr,
+enum class StmtKind {
+  None,
+  Return,
+  Break,
+  Continue,
+  Block,
+  If,
+  While,
+  For,
+  Do,
+  Switch,
+  AutoAssign,  // colon assign
+  Assign,
+  Expr,
 };
-struct Stmt {};
+struct StmtBase {
+  virtual ~StmtBase() = default;
+};
 
-enum ExprKind {
-  ExprNone,
-  ExprInt,
-  ExprFloat,
-  ExprName,
-  ExprStr,
-  ExprCast,
-  ExprCall,
-  ExprIndex,
-  ExprField,
-  ExprCompound,
-  ExprUnary,
-  ExprBinary,
-  ExprTernary
+struct StmtBlock {
+  vector<Stmt*> stmts;
 };
-struct Expr {};
+
+// return
+struct ReturnStmt : StmtBase {
+  Expr* expr_;
+};
+
+// For break and continue, StmtKind is enough
+
+// block
+struct StmtBlockStmt : StmtBase {
+  StmtBlock block_;
+};
+
+// If
+struct IfStmt : StmtBase {
+  struct Data {
+    Expr* cond;
+    StmtBlock* block;
+  };
+  Expr* if_expr;
+  StmtBlock then_block;
+  vector<Data> elseifs;
+  StmtBlock else_block;
+};
+
+// while
+struct WhileStmt : StmtBase {
+  Expr* expr;
+  StmtBlock block;
+};
+
+// do while
+struct DoWhileStmt : StmtBase {
+  StmtBlock block;
+  Expr* expr;
+};
+
+// auto assignment
+struct AutoAssignStmt : StmtBase {
+  const char* var_name;
+  Expr* var_expr;
+};
+
+// switch
+struct SwitchStmt : StmtBase {
+  struct Data {
+    vector<Expr*> exprs_;  // why is this a vector
+    StmtBlock block_;
+  };
+
+  Expr* expr_;
+  vector<Data*> cases_;
+};
+
+// assignment operators
+struct AssignmentStmt : StmtBase {
+  Expr* rhs;
+};
+
+struct BinaryStmt : StmtBase {  // think of a better name
+  Expr* lhs;
+  Expr* rhs;
+};
+
+// for
+struct ForStmt : StmtBase {
+  StmtBlock for_init;
+  StmtBlock for_next;
+  StmtBlock block;
+};
+
+struct Stmt {
+  StmtKind kind_;
+  unique_ptr<StmtBase> base_;
+};
+
+enum class ExprKind {
+  None,
+  Int,
+  Float,
+  Name,
+  Str,
+  Cast,
+  Call,
+  Index,
+  Field,
+  Compound,
+  Unary,
+  Binary,
+  Ternary
+};
+
+struct ExprBase {
+  virtual ~ExprBase() = default;
+};
+
+template <typename T>
+struct LiteralExpr : ExprBase {
+  T val;
+};
+using IntExpr = LiteralExpr<uint64_t>;
+using FloatExpr = LiteralExpr<double>;
+using NameExpr = LiteralExpr<const char*>;
+using StrExpr = LiteralExpr<const char*>;
+
+struct CastExpr : ExprBase {
+  TypeSpec* type;
+  Expr* expr;
+};
+
+struct CompoundLiteralExpr : ExprBase {
+  TypeSpec* type;
+  vector<Expr*> args;
+};
+
+struct UnaryExpr : ExprBase {
+  TokenKind op;
+  Expr* operand;
+};
+struct CallExpr : ExprBase {
+  Expr* operand;
+  vector<Expr*> args;
+};
+struct IndexExpr : ExprBase {
+  Expr* operand;
+  Expr* index;
+};
+struct FieldExpr : ExprBase {
+  Expr* operand;
+  const char* field;
+};
+struct BinaryExpr : ExprBase {
+  TokenKind op;
+  Expr* left;
+  Expr* right;
+};
+struct TernaryExpr : ExprBase {
+  Expr* cond;
+  Expr* then_expr;
+  Expr* else_expr;
+};
+
+struct Expr {
+  ExprKind kind_;
+  unique_ptr<ExprBase> base_;
+  template <typename T>
+  T get() {
+    static_assert(std::is_pointer_v<T>);
+    static_assert(std::is_base_of_v<ExprBase, std::remove_pointer_t<T>>);
+    assert(dynamic_cast<T>(base_.get()));
+    return static_cast<T>(base_.get());
+  }
+};
+
+class Expressions {
+ public:
+  ~Expressions() {
+    for (int i = 0; i < exprs_.size(); ++i) {
+      delete exprs_[i];
+    }
+  }
+
+  Expr* expr_int(uint64_t value) {
+    auto up = make_unique<IntExpr>();
+    up->val = value;
+    return exprs_.push_back(new Expr{ExprKind::Int, std::move(up)});
+  }
+  Expr* expr_float(double value) {
+    auto up = make_unique<FloatExpr>();
+    up->val = value;
+    return exprs_.push_back(new Expr{ExprKind::Float, std::move(up)});
+  }
+  Expr* expr_str(const char* value) {
+    auto up = make_unique<StrExpr>();
+    up->val = value;
+    return exprs_.push_back(new Expr{ExprKind::Str, std::move(up)});
+  }
+  Expr* expr_name(const char* value) {
+    auto up = make_unique<NameExpr>();
+    up->val = value;
+    return exprs_.push_back(new Expr{ExprKind::Name, std::move(up)});
+  }
+  Expr* expr_cast(TypeSpec* type, Expr* expr) {
+    auto up = make_unique<CastExpr>();
+    up->type = type;
+    up->expr = expr;
+    return exprs_.push_back(new Expr{ExprKind::Cast, std::move(up)});
+  }
+  Expr* expr_unary(TokenKind op, Expr* expr) {
+    auto up = make_unique<UnaryExpr>();
+    up->op = op;
+    up->operand = expr;
+    return exprs_.push_back(new Expr{ExprKind::Unary, std::move(up)});
+  }
+  Expr* expr_binary(TokenKind op, Expr* left, Expr* right) {
+    auto up = make_unique<BinaryExpr>();
+    up->op = op;
+    up->left = left;
+    up->right = right;
+    return exprs_.push_back(new Expr{ExprKind::Binary, std::move(up)});
+  }
+
+  Expr* expr_ternary(Expr* cond, Expr* then_expr, Expr* else_expr) {
+    auto up = make_unique<TernaryExpr>();
+    up->cond = cond;
+    up->then_expr = then_expr;
+    up->else_expr = else_expr;
+    return exprs_.push_back(new Expr{ExprKind::Ternary, std::move(up)});
+  }
+
+  Expr* expr_field(Expr* operand, const char* name) {
+    auto up = make_unique<FieldExpr>();
+    up->operand = operand;
+    up->field = name;
+    return exprs_.push_back(new Expr{ExprKind::Field, std::move(up)});
+  }
+
+  Expr* expr_call(Expr* operand, vector<Expr*> args) {
+    auto up = make_unique<CallExpr>();
+    up->operand = operand;
+    up->args = std::move(args);
+    return exprs_.push_back(new Expr{ExprKind::Call, std::move(up)});
+  }
+
+  Expr* expr_index(Expr* operand, Expr* index) {
+    auto up = make_unique<IndexExpr>();
+    up->operand = operand;
+    up->index = index;
+    return exprs_.push_back(new Expr{ExprKind::Index, std::move(up)});
+  }
+
+ private:
+  vector<Expr*> exprs_;  // owning
+};
+
+void print_expr(Expr* expr);
+void print_type(TypeSpec* type) {
+  switch (type->kind_) {
+    case TypeSpecKind::None:
+      assert(false);
+      break;
+    case TypeSpecKind::Name:
+      printf("%s", type->get<NameTypeSpec*>()->name);
+      break;
+    case TypeSpecKind::Func: {
+      auto* ft = type->get<FuncTypeSpec*>();
+      printf("(func (");
+      for (auto arg : ft->args) {
+        printf(" ");
+        print_type(arg);
+      }
+      printf(") ");
+      print_type(ft->ret_type);
+      printf(")");
+    } break;
+    case TypeSpecKind::Array: {
+      auto* array = type->get<ArrayTypeSpec*>();
+      printf("(array ");
+      print_type(array->type);
+      printf(" ");
+      print_expr(array->len);
+      printf(")");
+    } break;
+    case TypeSpecKind::Pointer: {
+      auto* ptr = type->get<PointerTypeSpec*>();
+      printf("(pointer ");
+      print_type(ptr->type);
+      printf(")");
+    } break;
+    default:
+      assert(false);
+      break;
+  }
+}
+
+void print_expr(Expr* expr) {
+  switch (expr->kind_) {
+    case ExprKind::None:
+      assert(false);
+      break;
+    case ExprKind::Int:
+      printf("%lu", expr->get<IntExpr*>()->val);
+      break;
+    case ExprKind::Float:
+      printf("%f", expr->get<FloatExpr*>()->val);
+      break;
+    case ExprKind::Name:
+      printf("%s", expr->get<NameExpr*>()->val);
+      break;
+    case ExprKind::Str:
+      printf("\"%s\"", expr->get<StrExpr*>()->val);
+      break;
+    case ExprKind::Cast: {
+      auto* exp = expr->get<CastExpr*>();
+
+      printf("(cast ");
+      print_type(exp->type);
+      printf(" ");
+      print_expr(exp->expr);
+      printf(")");
+    } break;
+    case ExprKind::Call: {
+      auto* call = expr->get<CallExpr*>();
+      printf("(");
+      print_expr(call->operand);
+      for (auto arg : call->args) {
+        printf(" ");
+        print_expr(arg);
+      }
+      printf(")");
+    } break;
+    case ExprKind::Index: {
+      auto* index = expr->get<IndexExpr*>();
+      printf("(index ");
+      print_expr(index->operand);
+      printf(" ");
+      print_expr(index->index);
+      printf(")");
+    } break;
+    case ExprKind::Field: {
+      auto* field = expr->get<FieldExpr*>();
+      printf("(field ");
+      print_expr(field->operand);
+      printf(" %s)", field->field);
+    } break;
+    case ExprKind::Binary: {
+      auto* bin = expr->get<BinaryExpr*>();
+      printf("(%c ", bin->op);
+      print_expr(bin->left);
+      printf(" ");
+      print_expr(bin->right);
+      printf(")");
+    } break;
+    case ExprKind::Compound: {
+      printf("(compound...)");
+    } break;
+    case ExprKind::Unary: {
+      auto* un = expr->get<UnaryExpr*>();
+      printf("(%c ", un->op);
+      print_expr(un->operand);
+      printf(")");
+    } break;
+    case ExprKind::Ternary: {
+      auto* tern = expr->get<TernaryExpr*>();
+      printf("(if ");
+      print_expr(tern->cond);
+      printf(" ");
+      print_expr(tern->then_expr);
+      printf(" ");
+      print_expr(tern->else_expr);
+      printf(")");
+      break;
+    }
+  }
+}
+
+void expr_test() {
+  auto print = [](Expr* expr) {
+    print_expr(expr);
+    printf("\n");
+  };
+
+  Expressions exprs{};
+  TypeSpecs types{};
+
+  vector<Expr*> args{};
+  args.push_back(exprs.expr_int(42));
+  args.push_back(exprs.expr_int(1779));
+
+  Expr* collection[] = {
+      exprs.expr_binary((TokenKind)'+', exprs.expr_int(1), exprs.expr_int(2)),
+      exprs.expr_unary((TokenKind)'-', exprs.expr_float(3.14)),
+      exprs.expr_ternary(exprs.expr_name("cond"), exprs.expr_str("then"),
+                         exprs.expr_str("else")),
+      exprs.expr_field(exprs.expr_name("person"), "name"),
+      exprs.expr_call(exprs.expr_name("add"), std::move(args)),
+      exprs.expr_index(exprs.expr_field(exprs.expr_name("person"), "siblings"),
+                       exprs.expr_int(3)),
+      exprs.expr_cast(types.typespec_name("int_ptr"),
+                      exprs.expr_name("void_ptr")),
+  };
+
+  for (auto expr : collection) {
+    print(expr);
+  }
+}
+
+void ast_test() {
+  expr_test();
+}
 
 void run_tests() {
   vec_test();
   str_intern_test();
   lex_test();
+  ast_test();
 }
 
 int main() {
